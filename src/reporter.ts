@@ -1,5 +1,7 @@
-import { writeFile, readFile } from 'fs/promises';
-import * as child from 'child_process';
+import { writeFile } from 'fs/promises';
+import execa from 'execa';
+import pMap from 'p-map';
+import * as tmp from 'tmp-promise';
 import {
   AggregatedResult,
   BaseReporter,
@@ -15,7 +17,6 @@ export default class SavingReporter extends BaseReporter {
     results: AggregatedResult,
   ): Promise<void> {
     await super.onTestResult(test, testResult, results);
-    console.log('RESULT');
 
     if (0 !== testResult.numFailingTests) return;
 
@@ -23,28 +24,40 @@ export default class SavingReporter extends BaseReporter {
     if (!coverage) return;
 
     const testFilePath = relativePath(test.context, testResult.testFilePath);
+    console.log(`START ${testFilePath}`);
 
-    const cleaned = [];
+    const cleaned = await pMap(
+      coverage,
+      async (cov) => {
+        const tr = cov.codeTransformResult;
+        if (!tr) throw new Error('no transform result');
 
-    for (const cov of coverage) {
-      const tr = cov.codeTransformResult;
-      if (!tr) throw new Error('no transform result');
-      const sourceMap = await readFile(tr.sourceMapPath!);
-      console.log('RECORD');
-      cleaned.push({
-        codeTransformResult: {
-          code: writeObject(
-            tr.code.replace(/\n\/\/# sourceMappingURL=[^\n]+$/, ''),
-          ),
-          originalCode: writeObject(tr.originalCode),
-          sourceMap: writeObject(sourceMap),
-          wrapperLength: tr.wrapperLength,
-        },
-        result: cov.result,
-      });
-    }
+        const codeFile = await writeTemporaryFile(
+          tr.code.replace(/\n\/\/# sourceMappingURL=[^\n]+$/, ''),
+        );
+        const originalCodeFile = await writeTemporaryFile(tr.originalCode);
+        const [code, originalCode, sourceMap] = await hashObjects([
+          codeFile.path,
+          originalCodeFile.path,
+          tr.sourceMapPath!,
+        ]);
+        void codeFile.cleanup();
+        void originalCodeFile.cleanup();
 
-    console.log('CLEANED');
+        return {
+          codeTransformResult: {
+            code,
+            originalCode,
+            sourceMap,
+            wrapperLength: tr.wrapperLength,
+          },
+          result: cov.result,
+        };
+      },
+      { concurrency: 32 },
+    );
+
+    console.log(`DONE  ${testFilePath}`);
 
     await writeFile(`${testFilePath}.covdata`, JSON.stringify(cleaned));
   }
@@ -52,17 +65,21 @@ export default class SavingReporter extends BaseReporter {
 
 type Hash = string;
 
-function writeObject(input: string | Buffer): Hash {
-  return (
-    'git:' +
-    child
-      .execFileSync('git', ['hash-object', '-w', '--stdin'], {
-        input,
-        encoding: 'utf-8',
-        timeout: 5000,
-      })
-      .trim()
-  );
+async function writeTemporaryFile(
+  input: string | Buffer,
+): ReturnType<typeof tmp.file> {
+  const f = await tmp.file();
+  await writeFile(f.path, input);
+  console.log(f.path);
+  return f;
+}
+
+async function hashObjects(paths: string[]): Promise<Hash[]> {
+  const { stdout } = await execa('git', ['hash-object', '-w', ...paths], {
+    encoding: 'utf-8',
+  });
+  return stdout.trim().split('\n');
+  // return ['a','b','c'];
 }
 
 // close enough
