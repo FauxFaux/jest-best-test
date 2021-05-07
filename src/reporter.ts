@@ -77,7 +77,7 @@ export default class SavingReporter extends BaseReporter {
   }
 }
 
-type Hash = string;
+export type Hash = string;
 
 async function writeTemporaryFile(
   input: string | Buffer,
