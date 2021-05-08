@@ -6,27 +6,15 @@ import pMap from 'p-map';
 import { brotliDecompressSync } from 'zlib';
 import LineColumn from 'line-column';
 import execa from 'execa';
-import type { CovDataElement, CovDataFile, Hash } from './types';
+import type { CovDataElement, CovDataFile } from './types';
 import smurl from 'source-map-url';
 import parseDataURL from 'data-urls';
 import { SourceMapConsumer } from 'source-map-js';
 
-async function handle(
-  covDataPath: string,
-  bySource: { [p: string]: { [p: string]: CovDataElement } },
-) {
-  const body: CovDataFile = JSON.parse(
+async function loadFile(covDataPath: string): Promise<CovDataFile> {
+  return JSON.parse(
     brotliDecompressSync(await readFile(covDataPath)).toString('utf-8'),
   );
-  const suiteName = body.testFilePath;
-  for (const el of body.sourceFilesCovered) {
-    const sourcePath = el.result.url;
-    if (!(sourcePath in bySource)) {
-      bySource[sourcePath] = {};
-    }
-
-    bySource[sourcePath][suiteName] = el;
-  }
 }
 
 /**  1-indexed (like text editors) */
@@ -42,17 +30,13 @@ interface SourceCoverage {
 }
 
 async function main() {
-  const bySource: {
-    [sourcePath: string]: { [testName: string]: CovDataElement };
-  } = {};
-
   const cwd = join(process.argv[2], 'coverage/.covdata');
-  await pMap(
-    glob.sync('**/*.covdata.br', { cwd }),
+  const covDatas = await pMap(
+    glob.sync('**/*.covdata.br', { cwd }).sort(),
     async (covDataPath) => {
       const fullPath = join(cwd, covDataPath);
       try {
-        await handle(fullPath, bySource);
+        return await loadFile(fullPath);
       } catch (err) {
         err.message += ` processing ${fullPath}`;
         throw err;
@@ -95,8 +79,9 @@ async function main() {
     return toLine;
   }
 
-  for (const [source, wat] of Object.entries(bySource)) {
-    for (const [test, el] of Object.entries(wat)) {
+  for (const testSuite of covDatas) {
+    console.log('for test suite', testSuite.testFilePath);
+    for (const el of testSuite.sourceFilesCovered) {
       const good = el.result.functions.filter(
         // ignore non-block coverage, as it's poor quality
         ({ isBlockCoverage }) => isBlockCoverage,
@@ -131,7 +116,11 @@ async function main() {
         ];
       });
 
-      console.log(source, el.code, test, inspect(realLines, false, 4, true));
+      console.log(
+        el.result.url,
+        testSuite.testFilePath,
+        inspect(realLines, false, 4, true),
+      );
     }
   }
 }
