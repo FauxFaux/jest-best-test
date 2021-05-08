@@ -1,3 +1,4 @@
+import { join, dirname } from 'path';
 import { writeFile } from 'fs/promises';
 import { brotliCompressSync, constants } from 'zlib';
 import execa from 'execa';
@@ -10,6 +11,8 @@ import {
   Test,
   TestResult,
 } from '@jest/reporters';
+import mkdirp from 'mkdirp';
+import { CovDataElement, CovDataFile, Hash } from './types';
 
 export default class SavingReporter extends BaseReporter {
   async onTestResult(
@@ -39,6 +42,7 @@ export default class SavingReporter extends BaseReporter {
         return {
           files: [codeFile, originalCodeFile] as const,
           result: cov.result,
+          wrapperLength: tr.wrapperLength,
         };
       },
       { concurrency: 32 },
@@ -55,19 +59,30 @@ export default class SavingReporter extends BaseReporter {
       { concurrency: 32 },
     );
 
-    const output: unknown[] = [];
+    const output: CovDataElement[] = [];
     // unpack the 2-tuples of files back to fields
     for (let i = 0; i < cleaned.length; ++i) {
       output.push({
         result: cleaned[i].result,
+        wrapperLength: cleaned[i].wrapperLength,
         code: hashes[i * 2],
         originalCode: hashes[i * 2 + 1],
       });
     }
 
+    const coverageDir = join(test.context.config.rootDir, 'coverage/.covdata');
+    const outputFile = join(coverageDir, testFilePath + '.covdata.br');
+    await mkdirp(dirname(outputFile));
+
+    const file: CovDataFile = {
+      version: 1,
+      testFilePath,
+      sourceFilesCovered: output,
+      duration: testResult.perfStats.runtime,
+    };
     await writeFile(
-      `${testFilePath}.covdata.br`,
-      brotliCompressSync(JSON.stringify(output), {
+      outputFile,
+      brotliCompressSync(JSON.stringify(file), {
         params: {
           [constants.BROTLI_PARAM_QUALITY]: 1,
           [constants.BROTLI_PARAM_MODE]: constants.BROTLI_MODE_TEXT,
@@ -76,8 +91,6 @@ export default class SavingReporter extends BaseReporter {
     );
   }
 }
-
-export type Hash = string;
 
 async function writeTemporaryFile(
   input: string | Buffer,
