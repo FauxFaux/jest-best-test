@@ -6,7 +6,7 @@ import pMap from 'p-map';
 import { brotliDecompressSync } from 'zlib';
 import LineColumn from 'line-column';
 import execa from 'execa';
-import type { CovDataElement, CovDataFile } from './types';
+import type { CovDataElement, CovDataFile, Hash } from './types';
 import smurl from 'source-map-url';
 import parseDataURL from 'data-urls';
 import { SourceMapConsumer } from 'source-map-js';
@@ -35,6 +35,12 @@ interface SourcePosition {
   column: number;
 }
 
+interface SourceCoverage {
+  start: SourcePosition;
+  end: SourcePosition;
+  count: number;
+}
+
 async function main() {
   const bySource: {
     [sourcePath: string]: { [testName: string]: CovDataElement };
@@ -55,59 +61,77 @@ async function main() {
     { concurrency: 8 },
   );
 
+  const mappers: {
+    [codeHash: string]: (offset: number) => SourcePosition | null;
+  } = {};
+
+  async function mapperFor(el: Pick<CovDataElement, 'code' | 'wrapperLength'>) {
+    if (el.code in mappers) {
+      return mappers[el.code];
+    }
+
+    const codeResult = await execa('git', ['cat-file', 'blob', el.code], {
+      encoding: 'utf-8',
+      cwd,
+    });
+    const code = codeResult.stdout;
+    const lineMapper = LineColumn(code);
+
+    const toLine = (offset: number): SourcePosition | null => {
+      const pos = lineMapper.fromIndex(offset - el.wrapperLength);
+      // e.g. because it's outside of the reasonable area of code, such as the coverage info for the whole file (duh)
+      if (!pos) return null;
+      const consumer = new SourceMapConsumer(
+        JSON.parse(parseDataURL(smurl.getFrom(code)!)?.body.toString('utf-8')!),
+      );
+      const mapped = consumer.originalPositionFor({
+        line: pos.line,
+        column: pos.col - 1,
+      });
+      return { line: mapped.line, column: mapped.column + 1 };
+    };
+
+    mappers[el.code] = toLine;
+    return toLine;
+  }
+
   for (const [source, wat] of Object.entries(bySource)) {
     for (const [test, el] of Object.entries(wat)) {
       const good = el.result.functions.filter(
+        // ignore non-block coverage, as it's poor quality
         ({ isBlockCoverage }) => isBlockCoverage,
       );
       if (!good.length) continue;
-      const codeResult = await execa('git', ['cat-file', 'blob', el.code], {
-        encoding: 'utf-8',
-        cwd,
-      });
-      const code = codeResult.stdout;
-      const lineMapper = LineColumn(code);
-      const toLine = (offset: number): SourcePosition | null => {
-        const pos = lineMapper.fromIndex(offset - el.wrapperLength);
-        // e.g. because
-        if (!pos) return null;
-        const consumer = new SourceMapConsumer(
-          JSON.parse(
-            parseDataURL(smurl.getFrom(code)!)?.body.toString('utf-8')!,
-          ),
-        );
-        const mapped = consumer.originalPositionFor({
-          line: pos.line,
-          column: pos.col - 1,
+      const toLine = await mapperFor(el);
+
+      const realLines = good.flatMap<{
+        ranges: SourceCoverage[];
+        functionName: string;
+      }>((fc) => {
+        const ranges = fc.ranges.flatMap<SourceCoverage>((range) => {
+          const start = toLine(range.startOffset);
+          const end = toLine(range.endOffset);
+          if (!start || !end) return [];
+          return [
+            {
+              start,
+              end,
+              count: range.count,
+            },
+          ];
         });
-        return { line: mapped.line, column: mapped.column + 1 };
-      };
-      console.log(
-        source,
-        el.code,
-        test,
-        inspect(
-          good.map((v) => [
-            v.functionName,
-            ...v.ranges.flatMap((range) => {
-              const start = toLine(range.startOffset);
-              const end = toLine(range.endOffset);
-              if (!start || !end) return [];
-              return [
-                {
-                  start,
-                  end,
-                  count: range.count,
-                },
-              ];
-            }),
-          ]),
-          false,
-          4,
-          true,
-        ),
-      );
-      break;
+
+        if (!ranges.length) return [];
+
+        return [
+          {
+            functionName: fc.functionName,
+            ranges,
+          },
+        ];
+      });
+
+      console.log(source, el.code, test, inspect(realLines, false, 4, true));
     }
   }
 }
