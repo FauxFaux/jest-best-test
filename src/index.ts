@@ -79,6 +79,17 @@ async function main() {
     return toLine;
   }
 
+  const bySourceRange: {
+    [sourcePath: string]: {
+      [hypenatedRange: string]: {
+        start: SourcePosition;
+        end: SourcePosition;
+        functionName: string;
+        testCounts: { [testSuiteName: string]: number };
+      };
+    };
+  } = {};
+
   for (const testSuite of covDatas) {
     console.log('for test suite', testSuite.testFilePath);
     for (const el of testSuite.sourceFilesCovered) {
@@ -87,42 +98,36 @@ async function main() {
         ({ isBlockCoverage }) => isBlockCoverage,
       );
       if (!good.length) continue;
-      const toLine = await mapperFor(el);
 
-      const realLines = good.flatMap<{
-        ranges: SourceCoverage[];
-        functionName: string;
-      }>((fc) => {
-        const ranges = fc.ranges.flatMap<SourceCoverage>((range) => {
-          const start = toLine(range.startOffset);
-          const end = toLine(range.endOffset);
-          if (!start || !end) return [];
-          return [
-            {
+      const sourcePath = el.result.url;
+      if (!(sourcePath in bySourceRange)) {
+        bySourceRange[sourcePath] = {};
+      }
+
+      const thisSourceRange = bySourceRange[sourcePath];
+
+      for (const func of good) {
+        for (const range of func.ranges) {
+          const hyphenated = `${range.startOffset}-${range.endOffset}`;
+          if (!(hyphenated in thisSourceRange)) {
+            const toLine = await mapperFor(el);
+            const start = toLine(range.startOffset);
+            const end = toLine(range.endOffset);
+            if (!start || !end) continue;
+            thisSourceRange[hyphenated] = {
               start,
               end,
-              count: range.count,
-            },
-          ];
-        });
-
-        if (!ranges.length) return [];
-
-        return [
-          {
-            functionName: fc.functionName,
-            ranges,
-          },
-        ];
-      });
-
-      console.log(
-        el.result.url,
-        testSuite.testFilePath,
-        inspect(realLines, false, 4, true),
-      );
+              functionName: func.functionName,
+              testCounts: {},
+            };
+          }
+          thisSourceRange[hyphenated].testCounts[testSuite.testFilePath] =
+            range.count;
+        }
+      }
     }
   }
+  console.log(inspect(bySourceRange, false, 4, true));
 }
 
 main().catch((err) => {
