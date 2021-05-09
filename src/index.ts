@@ -8,7 +8,6 @@ import LineColumn from 'line-column';
 import execa from 'execa';
 import type { CovDataElement, CovDataFile } from './types';
 import smurl from 'source-map-url';
-import parseDataURL from 'data-urls';
 import { SourceMapConsumer } from 'source-map-js';
 
 async function loadFile(covDataPath: string): Promise<CovDataFile> {
@@ -128,6 +127,17 @@ async function main() {
     }
   }
   console.log(inspect(bySourceRange, false, 4, true));
+}
+
+const REGEX = /^data:(.+?);base64,(.*)/;
+
+function parseDataURL(url: string) {
+  const ma = url.match(REGEX);
+  if (!ma) throw new Error(`unrecognised data url: ${url}`);
+  const [, mime, base] = ma;
+  if (!mime.startsWith('application/json'))
+    throw new Error(`bad mime type in source map: ${mime}`);
+  return { body: Buffer.from(base, 'base64') };
 }
 
 main().catch((err) => {
